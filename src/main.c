@@ -13,6 +13,9 @@
 #include <sys/time.h>
 #include "esp_sntp.h"
 
+#include <driver/rmt.h>
+#include "led_strip.h"
+
 /* The examples use WiFi configuration that you can set via project configuration menu
    If you'd rather not, just change the below entries to strings with
    the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
@@ -29,6 +32,10 @@ static EventGroupHandle_t s_wifi_event_group;
  * - we failed to connect after the maximum amount of retries */
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
+
+#define LED_STRIP_LED_COUNT 24
+#define CONFIG_EXAMPLE_RMT_TX_GPIO 18
+#define RMT_TX_CHANNEL RMT_CHANNEL_0
 
 static int s_retry_num = 0;
 
@@ -204,6 +211,10 @@ void app_main() {
     wifi_init_sta();
 
     initialize_sntp();
+
+
+    rmt_config_t config = RMT_DEFAULT_CONFIG_TX(CONFIG_EXAMPLE_RMT_TX_GPIO, RMT_TX_CHANNEL);
+    led_strip_config_t strip_config = LED_STRIP_DEFAULT_CONFIG(LED_STRIP_LED_COUNT, (led_strip_dev_t)config.channel);
 
 
     time_t now;
