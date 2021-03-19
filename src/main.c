@@ -10,19 +10,13 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include <time.h>
-#include <sys/time.h>
-#include "esp_sntp.h"
+
+#include "main.h"
+#include "ntp_task.h"
 
 #include <driver/rmt.h>
 #include "led_strip.h"
 
-/* The examples use WiFi configuration that you can set via project configuration menu
-   If you'd rather not, just change the below entries to strings with
-   the config you want - ie #define EXAMPLE_WIFI_SSID "mywifissid"
-*/
-#define WIFI_SSID      "MKLanGast"
-#define WIFI_PASS      "MartaKaiLanGast"
-#define WIFI_MAXIMUM_RETRY  5
 
 /* FreeRTOS event group to signal when we are connected*/
 static EventGroupHandle_t s_wifi_event_group;
@@ -33,18 +27,9 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
-#define LED_STRIP_LED_COUNT 4
-#define CONFIG_EXAMPLE_RMT_TX_GPIO 18
-#define RMT_TX_CHANNEL RMT_CHANNEL_0
-#define EXAMPLE_CHASE_SPEED_MS (100)
-
 static int s_retry_num = 0;
 
 static const char *TAG = "wifi station";
-
-#define BLINK_GPIO 2
-
-static uint8_t s_led_state = 0;
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -142,59 +127,6 @@ void wifi_init_sta(void)
 }
 
 
-static void blink_led(void)
-{
-    /* Set the GPIO level according to the state (LOW or HIGH)*/
-    gpio_set_level(BLINK_GPIO, s_led_state);
-}
-
-static void configure_led(void)
-{
-    ESP_LOGI(TAG, "Example configured to blink GPIO LED!");
-    gpio_reset_pin(BLINK_GPIO);
-    /* Set the GPIO as a push/pull output */
-    gpio_set_direction(BLINK_GPIO, GPIO_MODE_OUTPUT);
-}
-
-void time_sync_notification_cb(struct timeval *tv)
-{
-    ESP_LOGI(TAG, "Notification of a time synchronization event");
-}
-
-
-static void initialize_sntp(void)
-{
-    ESP_LOGI(TAG, "Initializing SNTP");
-    sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    sntp_setservername(0, "pool.ntp.org");
-    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
-#ifdef CONFIG_SNTP_TIME_SYNC_METHOD_SMOOTH
-    sntp_set_sync_mode(SNTP_SYNC_MODE_SMOOTH);
-#endif
-    sntp_init();
-}
-
-static void obtain_time(void)
-{
-    // ESP_ERROR_CHECK( esp_event_loop_create_default() );
-
-    /* This helper function configures Wi-Fi or Ethernet, as selected in menuconfig.
-     * Read "Establishing Wi-Fi or Ethernet Connection" section in
-     * examples/protocols/README.md for more information about this function.
-     */
-
-    // wait for time to be set
-    time_t now = 0;
-    struct tm timeinfo = { 0 };
-    int retry = 0;
-    const int retry_count = 20;
-    while (sntp_get_sync_status() == SNTP_SYNC_STATUS_RESET && ++retry < retry_count) {
-        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
-        vTaskDelay(2000 / portTICK_PERIOD_MS);
-    }
-    time(&now);
-    localtime_r(&now, &timeinfo);
-}
 void led_strip_hsv2rgb(uint32_t h, uint32_t s, uint32_t v, uint32_t *r, uint32_t *g, uint32_t *b)
 {
     h %= 360; // h -> [0,360]
@@ -242,9 +174,7 @@ void led_strip_hsv2rgb(uint32_t h, uint32_t s, uint32_t v, uint32_t *r, uint32_t
 }
 
 void app_main() {
-    /* Configure the peripheral according to the LED type */
-    configure_led();
-
+    
     //Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -257,7 +187,6 @@ void app_main() {
     wifi_init_sta();
 
     initialize_sntp();
-
 
     rmt_config_t config = RMT_DEFAULT_CONFIG_TX(CONFIG_EXAMPLE_RMT_TX_GPIO, RMT_TX_CHANNEL);
     // set counter clock to 40MHz
@@ -275,27 +204,7 @@ void app_main() {
     ESP_ERROR_CHECK(strip->clear(strip, 100));
 
 
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-    // Is time set? If not, tm_year will be (1970 - 1900).
-    if (timeinfo.tm_year < (2016 - 1900)) {
-        ESP_LOGI(TAG, "Time is not set yet. Connecting to WiFi and getting time over NTP.");
-        obtain_time();
-        // update 'now' variable with current time
-        time(&now);
-    }
-
-
-    char strftime_buf[64];
-
-    // Set timezone to Eastern Standard Time and print local time
-    setenv("TZ", "CET-1CEST-2,M3.5.0/02:00:00,M10.5.0/03:00:00", 1);
-    tzset();
-    localtime_r(&now, &timeinfo);
-    strftime(strftime_buf, sizeof(strftime_buf), "%c", &timeinfo);
-    ESP_LOGI(TAG, "The current date/time in Germany is: %s", strftime_buf);
+    start_ntp_task();
 
     uint32_t red = 0;
     uint32_t green = 0;
@@ -304,6 +213,14 @@ void app_main() {
     uint16_t start_rgb = 0;
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));
+
+        if( ntp_time_in_sync == 1 ) {
+            ESP_ERROR_CHECK(strip->set_pixel(strip, 0, 0, 0xFFFFFFFF, 0));
+        } else {
+            ESP_ERROR_CHECK(strip->set_pixel(strip, 0, 0xFFFFFFFF, 0, 0));
+        }
+        ESP_ERROR_CHECK(strip->refresh(strip, 100));
+        
         /*
         for (int i = 0; i < 3; i++) {
             for (int j = i; j < LED_STRIP_LED_COUNT; j += 3) {
